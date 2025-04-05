@@ -1,60 +1,70 @@
 ﻿using SkiaSharp;
 using SkiaSharp.Views.Desktop;
-using System.Timers;
+using System.Diagnostics;
 
 namespace LeviDraw;
 
-public class CoordinateSystem : SKControl, IDisposable
+public class CoordinateSystem : SKGLControl, System.IDisposable
 {
+
+    #region PropertiesAndConstructors
+
     public Grid Grid { get; set; }
     public Axes Axes { get; set; }
     public KeyBinds KeyBinds { get; set; }
+
     private float offsetX;
     private float offsetY;
     private float scale;
-    private System.Timers.Timer updateTimer;
-    private HashSet<Keys> pressedKeys;
+    private float squareValue;
+    private List<LineSegment> segments;
+    private LineSegment? currentSegment;
+    private InputManager inputManager;
+    private TransformManager transformManager;
+    private System.Windows.Forms.Timer updateTimer;
+    private Stopwatch stopwatch;
     private float moveSpeedMultiplier;
-    private bool isDragging;
-    private Point lastMousePosition;
-    private volatile bool _dirty;
+
     private const float MinScale = 0.5f;
     private const float MaxScale = 5f;
-    private float squareValue;
     private const float MinSquareValue = 0.1f;
     private const float MaxSquareValue = 10f;
     private const float MouseMoveThreshold = 2f;
 
     public CoordinateSystem() : base()
     {
-        BackColor = SystemColors.Control;
+        BackColor = System.Drawing.SystemColors.Control;
         TabStop = true;
+
         offsetX = 0f;
         offsetY = 0f;
         scale = 1f;
         squareValue = 1f;
-        moveSpeedMultiplier = 5.0f;
-        Grid = new Grid(scale);
+        moveSpeedMultiplier = 375.0f;
+        Grid = new Grid();
         Axes = new Axes();
         KeyBinds = new KeyBinds();
+        inputManager = new InputManager();
+        transformManager = new TransformManager();
         PaintSurface += OnPaintSurface;
-        updateTimer = new System.Timers.Timer(16);
-        updateTimer.AutoReset = true;
-        updateTimer.Elapsed += UpdateTimer_Elapsed;
-        pressedKeys = new HashSet<Keys>();
-        isDragging = false;
-        _dirty = false;
+        updateTimer = new System.Windows.Forms.Timer();
+        updateTimer.Interval = 16;
+        updateTimer.Tick += UpdateTimer_Tick;
+        stopwatch = Stopwatch.StartNew();
+        segments = new List<LineSegment>();
     }
+
+    #endregion
+
+    #region Methods
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
-        if (!pressedKeys.Contains(e.KeyCode))
+        inputManager.HandleKeyDown(e);
+        if (inputManager.HasActiveInput() && !updateTimer.Enabled)
         {
-            pressedKeys.Add(e.KeyCode);
-        }
-        if (pressedKeys.Count > 0 && !updateTimer.Enabled)
-        {
+            stopwatch.Restart();
             updateTimer.Start();
         }
     }
@@ -62,11 +72,8 @@ public class CoordinateSystem : SKControl, IDisposable
     protected override void OnKeyUp(KeyEventArgs e)
     {
         base.OnKeyUp(e);
-        if (pressedKeys.Contains(e.KeyCode))
-        {
-            pressedKeys.Remove(e.KeyCode);
-        }
-        if (pressedKeys.Count == 0 && !isDragging && updateTimer.Enabled)
+        inputManager.HandleKeyUp(e);
+        if (!inputManager.HasActiveInput() && !inputManager.IsDragging && updateTimer.Enabled)
         {
             updateTimer.Stop();
         }
@@ -76,44 +83,61 @@ public class CoordinateSystem : SKControl, IDisposable
     {
         base.OnMouseDown(e);
         Focus();
+        inputManager.HandleMouseDown(e);
         if (e.Button == MouseButtons.Left)
         {
-            isDragging = true;
-            lastMousePosition = e.Location;
             if (!updateTimer.Enabled)
             {
+                stopwatch.Restart();
                 updateTimer.Start();
             }
+        }
+        if (e.Button == MouseButtons.Right)
+        {
+            currentSegment = new LineSegment(transformManager.ScreenToWorld(e.Location), transformManager.ScreenToWorld(e.Location));
+            MarkDirty();
         }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (isDragging)
+        if (inputManager.IsDragging)
         {
-            float dx = e.X - lastMousePosition.X;
-            float dy = e.Y - lastMousePosition.Y;
+            float dx = e.X - inputManager.LastMousePosition.X;
+            float dy = e.Y - inputManager.LastMousePosition.Y;
             if (Math.Abs(dx) >= MouseMoveThreshold || Math.Abs(dy) >= MouseMoveThreshold)
             {
                 offsetX += dx;
                 offsetY += dy;
-                lastMousePosition = e.Location;
+                inputManager.LastMousePosition = e.Location;
                 MarkDirty();
             }
+        }
+        if (currentSegment != null)
+        {
+            currentSegment.EndPoint = transformManager.ScreenToWorld(e.Location);
+            MarkDirty();
         }
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
+        inputManager.HandleMouseUp(e);
         if (e.Button == MouseButtons.Left)
         {
-            isDragging = false;
-            if (pressedKeys.Count == 0 && updateTimer.Enabled)
+            if (inputManager.PressedKeysCount == 0 && updateTimer.Enabled)
             {
                 updateTimer.Stop();
             }
+        }
+        if (e.Button == MouseButtons.Right && currentSegment != null)
+        {
+            currentSegment.EndPoint = transformManager.ScreenToWorld(e.Location);
+            segments.Add(currentSegment);
+            currentSegment = null;
+            MarkDirty();
         }
     }
 
@@ -122,79 +146,74 @@ public class CoordinateSystem : SKControl, IDisposable
         base.OnMouseWheel(e);
         if (e.Delta > 0)
         {
-            squareValue = Math.Min(squareValue + 0.1f, MaxSquareValue);
+            squareValue = Math.Max(squareValue - 0.1f, MinSquareValue);
         }
         else
         {
-            squareValue = Math.Max(squareValue - 0.1f, MinSquareValue);
+            squareValue = Math.Min(squareValue + 0.1f, MaxSquareValue);
         }
         MarkDirty();
     }
 
-    private void UpdateTimer_Elapsed(object? sender, ElapsedEventArgs e)
+    private void UpdateTimer_Tick(object? sender, EventArgs e)
     {
+        float dt = (float)stopwatch.Elapsed.TotalSeconds;
+        stopwatch.Restart();
         bool updated = false;
-        if (pressedKeys.Contains(KeyBinds.Movement.Left))
+        if (inputManager.IsKeyPressed(KeyBinds.Movement.Left))
         {
-            offsetX -= moveSpeedMultiplier;
+            offsetX -= moveSpeedMultiplier * dt;
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.Movement.Right))
+        if (inputManager.IsKeyPressed(KeyBinds.Movement.Right))
         {
-            offsetX += moveSpeedMultiplier;
+            offsetX += moveSpeedMultiplier * dt;
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.Movement.Up))
+        if (inputManager.IsKeyPressed(KeyBinds.Movement.Up))
         {
-            offsetY -= moveSpeedMultiplier;
+            offsetY -= moveSpeedMultiplier * dt;
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.Movement.Down))
+        if (inputManager.IsKeyPressed(KeyBinds.Movement.Down))
         {
-            offsetY += moveSpeedMultiplier;
+            offsetY += moveSpeedMultiplier * dt;
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.Zoom.Out) && scale >= MinScale)
+        double factor = Math.Pow(1.01, dt / 0.016);
+        if (inputManager.IsKeyPressed(KeyBinds.Zoom.Out) && scale >= MinScale)
         {
-            scale *= 0.99f;
+            scale = (float)Math.Max(MinScale, scale / factor);
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.Zoom.In) && scale <= MaxScale)
+        if (inputManager.IsKeyPressed(KeyBinds.Zoom.In) && scale <= MaxScale)
         {
-            scale *= 1.01f;
+            scale = (float)Math.Min(MaxScale, scale * factor);
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.SquareValue.Increase))
+        float squareStep = 0.1f * (dt / 0.016f);
+        if (inputManager.IsKeyPressed(KeyBinds.SquareValue.Decrease))
         {
-            squareValue = Math.Min(squareValue + 0.1f, MaxSquareValue);
+            squareValue = Math.Min(squareValue + squareStep, MaxSquareValue);
             updated = true;
         }
-        if (pressedKeys.Contains(KeyBinds.SquareValue.Decrease))
+        if (inputManager.IsKeyPressed(KeyBinds.SquareValue.Increase))
         {
-            squareValue = Math.Max(squareValue - 0.1f, MinSquareValue);
+            squareValue = Math.Max(squareValue - squareStep, MinSquareValue);
             updated = true;
         }
         if (updated)
         {
-            _dirty = true;
-        }
-        if (_dirty)
-        {
-            Invoke((Action)(() => { Invalidate(); _dirty = false; }));
+            MarkDirty();
         }
     }
 
     private void MarkDirty()
     {
-        _dirty = true;
-        if (!updateTimer.Enabled)
-        {
-            Invalidate();
-            _dirty = false;
-        }
+        Invalidate();
     }
 
-    private void OnPaintSurface(object? sender, SKPaintSurfaceEventArgs e)
+    private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
         SKCanvas canvas = e.Surface.Canvas;
         canvas.Clear(new SKColor(BackColor.R, BackColor.G, BackColor.B, BackColor.A));
@@ -202,13 +221,25 @@ public class CoordinateSystem : SKControl, IDisposable
         float effectiveGridSpacing = Grid.DefaultGridSpacing * scale;
         int spacing = Math.Max(1, (int)Math.Round(effectiveGridSpacing));
         if (Grid.ShowGrid)
-        {
             Grid.Draw(canvas, info, offsetX, offsetY, spacing);
-        }
         if (Axes.ShowAxes)
-        {
             Axes.Draw(canvas, info, offsetX, offsetY, effectiveGridSpacing, squareValue);
+        transformManager.Update(offsetX, offsetY, scale, squareValue);
+        Func<SKPoint, SKPoint> convert = pt => transformManager.WorldToScreen(pt);
+        foreach (var seg in segments)
+        {
+            SKPoint startScreen = convert(seg.StartPoint);
+            SKPoint endScreen = convert(seg.EndPoint);
+            float minX = Math.Min(startScreen.X, endScreen.X);
+            float maxX = Math.Max(startScreen.X, endScreen.X);
+            float minY = Math.Min(startScreen.Y, endScreen.Y);
+            float maxY = Math.Max(startScreen.Y, endScreen.Y);
+            if (maxX < 0 || minX > info.Width || maxY < 0 || minY > info.Height)
+                continue;
+            seg.Draw(canvas, convert);
         }
+        if (currentSegment != null)
+            currentSegment.Draw(canvas, convert);
     }
 
     public void MoveCoordinateSystem(float dx, float dy)
@@ -250,4 +281,7 @@ public class CoordinateSystem : SKControl, IDisposable
         }
         base.Dispose(disposing);
     }
+
+    #endregion
+
 }
