@@ -1,11 +1,10 @@
 ﻿using SkiaSharp;
 using MathNet.Symbolics;
-using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
 namespace LeviDraw;
 
-public class Function : IDisposable
+public class Function : System.IDisposable
 {
 
     #region Properties&Constructors
@@ -15,13 +14,16 @@ public class Function : IDisposable
     public float StrokeWidth { get; set; }
     public bool HardToEvaluate { get; private set; }
     public string ExpressionString { get; private set; }
-
     private SymbolicExpression _expression;
     private SymbolicExpression _derivativeExpression;
     private Func<double, double> _compiledFunction;
     private Func<double, double> _compiledDerivative;
-    private ConcurrentDictionary<double, (double y, double dy)> _cache;
+    private LruCache<double, (double, double)> _cache;
     private int _maxCacheSize;
+    private SKRect _cachedVisibleRect;
+    private SKMatrix _cachedTransformMatrix;
+    private List<Curve> _cachedCurves;
+    private bool _hasCachedCurves;
 
     public Function(string name, string expression, SKColor color, float strokeWidth)
     {
@@ -33,9 +35,11 @@ public class Function : IDisposable
         _derivativeExpression = _expression.Differentiate("x");
         _compiledFunction = _expression.Compile("x");
         _compiledDerivative = _derivativeExpression.Compile("x");
-        _cache = new ConcurrentDictionary<double, (double, double)>();
         HardToEvaluate = DetermineHardness(_expression.ToString());
         _maxCacheSize = HardToEvaluate ? 10000 : 5000;
+        _cache = new LruCache<double, (double, double)>(_maxCacheSize);
+        _cachedCurves = new List<Curve>(); // <== Inicializálva, így nem lesz null.
+        _hasCachedCurves = false;
     }
 
     #endregion
@@ -68,17 +72,12 @@ public class Function : IDisposable
     {
         double key = Quantize(x);
         if (_cache.TryGetValue(key, out var res))
-            return res.y;
+            return res.Item1;
         double y;
         try { y = _compiledFunction(x); } catch { y = double.NaN; }
         double dy;
         try { dy = _compiledDerivative(x); } catch { dy = double.NaN; }
-        if (_cache.Count >= _maxCacheSize)
-        {
-            var firstKey = _cache.Keys.FirstOrDefault();
-            _cache.TryRemove(firstKey, out _);
-        }
-        _cache[key] = (y, dy);
+        _cache.Add(key, (y, dy));
         return y;
     }
 
@@ -86,29 +85,27 @@ public class Function : IDisposable
     {
         double key = Quantize(x);
         if (_cache.TryGetValue(key, out var res))
-            return res.dy;
+            return res.Item2;
         double y;
         try { y = _compiledFunction(x); } catch { y = double.NaN; }
         double dy;
         try { dy = _compiledDerivative(x); } catch { dy = double.NaN; }
-        if (_cache.Count >= _maxCacheSize)
-        {
-            var firstKey = _cache.Keys.FirstOrDefault();
-            _cache.TryRemove(firstKey, out _);
-        }
-        _cache[key] = (y, dy);
+        _cache.Add(key, (y, dy));
         return dy;
     }
 
     internal List<Curve> ComputeCurves(SKRect visibleRect, TransformManager transform)
     {
+        SKMatrix currentMatrix = transform.Matrix;
+        if (_hasCachedCurves && visibleRect.Equals(_cachedVisibleRect) && currentMatrix.Equals(_cachedTransformMatrix))
+            return _cachedCurves;
         List<Curve> curves = new List<Curve>();
         List<SKPoint> currentPoints = new List<SKPoint>();
-        float step = GetAdaptiveStepSize(0, 0);
-        double prevDerivative = double.NaN;
         float left = visibleRect.Left;
         float right = visibleRect.Right;
-        for (float screenX = left; screenX <= right; screenX += step)
+        float screenX = left;
+        double prevDerivative = double.NaN;
+        while (screenX <= right)
         {
             double worldX = transform.ScreenToWorld(new System.Drawing.Point((int)screenX, 0)).X;
             double yVal = Evaluate(worldX);
@@ -122,7 +119,7 @@ public class Function : IDisposable
                     breakSegment = true;
                 else if (!double.IsNaN(prevDerivative) && Math.Abs(deriv - prevDerivative) > 1200)
                     breakSegment = true;
-                else if (Math.Abs(deriv) > 500 && Math.Abs(screenPoint.Y - currentPoints.Last().Y) > visibleRect.Height / 4.0f)
+                else if (Math.Abs(deriv) > 500 && Math.Abs(screenPoint.Y - currentPoints[currentPoints.Count - 1].Y) > visibleRect.Height / 4.0f)
                     breakSegment = true;
             }
             if (breakSegment)
@@ -151,22 +148,27 @@ public class Function : IDisposable
                     currentPoints.Clear();
                 }
             }
-            step = GetAdaptiveStepSize(deriv, prevDerivative);
+            float step = GetAdaptiveStepSize(worldX, deriv);
+            screenX += step;
         }
         if (currentPoints.Count > 0)
             curves.Add(new Curve(new List<SKPoint>(currentPoints), Color, StrokeWidth));
+        _cachedVisibleRect = visibleRect;
+        _cachedTransformMatrix = currentMatrix;
+        _cachedCurves = curves;
+        _hasCachedCurves = true;
         return curves;
     }
 
-    private float GetAdaptiveStepSize(double derivative, double prevDerivative)
+    private float GetAdaptiveStepSize(double worldX, double derivative)
     {
-        double absDeriv = Math.Abs(derivative);
-        double derivDiff = !double.IsNaN(prevDerivative) ? Math.Abs(derivative - prevDerivative) : 0;
-        float maxStep = (HardToEvaluate ? 5f : 10f);
-        float minStep = (HardToEvaluate ? 0.5f : 2f);
-        if (absDeriv >= 500)
-            return minStep;
-        double factor = 1.0 / (1.0 + absDeriv + derivDiff / 100.0);
+        double h = 1e-3;
+        double derivativePlus = EvaluateDerivative(worldX + h);
+        double derivativeMinus = EvaluateDerivative(worldX - h);
+        double curvature = (derivativePlus - derivativeMinus) / (2 * h);
+        float maxStep = HardToEvaluate ? 5f : 10f;
+        float minStep = HardToEvaluate ? 0.5f : 2f;
+        double factor = 1.0 / (1.0 + Math.Abs(derivative) + 0.01 * Math.Abs(curvature));
         double adaptiveStep = maxStep * factor;
         return (float)Math.Clamp(adaptiveStep, minStep, maxStep);
     }

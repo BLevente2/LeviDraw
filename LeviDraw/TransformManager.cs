@@ -5,7 +5,7 @@ namespace LeviDraw;
 internal class TransformManager
 {
 
-    #region PropertiesAndConstructors
+    #region Properties&Constructors
 
     private float currentOffsetX;
     private float currentOffsetY;
@@ -13,6 +13,8 @@ internal class TransformManager
     private float currentSquareValue;
     private SKMatrix _matrix;
     private SKMatrix _inverseMatrix;
+
+    internal SKMatrix Matrix => _matrix;
 
     internal TransformManager()
     {
@@ -35,7 +37,7 @@ internal class TransformManager
         currentScale = scale;
         currentSquareValue = squareValue;
         float factor = (Grid.DefaultGridSpacing * currentScale) / currentSquareValue;
-        _matrix = SKMatrix.CreateScaleTranslation(factor, factor, offsetX, offsetY);
+        _matrix = SKMatrix.CreateScaleTranslation(factor, -factor, offsetX, offsetY);
         if (!_matrix.TryInvert(out _inverseMatrix))
         {
             _inverseMatrix = SKMatrix.CreateIdentity();

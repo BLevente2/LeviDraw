@@ -7,11 +7,12 @@ namespace LeviDraw;
 public class CoordinateSystem : SKGLControl, System.IDisposable
 {
 
-    #region PropertiesAndConstructors
+    #region Properties&Constructors
 
     public Grid Grid { get; set; }
     public Axes Axes { get; set; }
     public KeyBinds KeyBinds { get; set; }
+    public List<Function> Functions { get; set; }
 
     private float offsetX;
     private float offsetY;
@@ -44,6 +45,7 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
         Grid = new Grid();
         Axes = new Axes();
         KeyBinds = new KeyBinds();
+        Functions = new List<Function>();
         inputManager = new InputManager();
         transformManager = new TransformManager();
         PaintSurface += OnPaintSurface;
@@ -213,7 +215,7 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
         Invalidate();
     }
 
-    private void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
+    private async void OnPaintSurface(object? sender, SKPaintGLSurfaceEventArgs e)
     {
         SKCanvas canvas = e.Surface.Canvas;
         canvas.Clear(new SKColor(BackColor.R, BackColor.G, BackColor.B, BackColor.A));
@@ -225,6 +227,9 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
         if (Axes.ShowAxes)
             Axes.Draw(canvas, info, offsetX, offsetY, effectiveGridSpacing, squareValue);
         transformManager.Update(offsetX, offsetY, scale, squareValue);
+        SKRect visibleRect = new SKRect(0, 0, info.Width, info.Height);
+        if (Functions.Count > 0)
+            await FunctionRenderer.RenderFunctions(canvas, Functions, visibleRect, transformManager);
         Func<SKPoint, SKPoint> convert = pt => transformManager.WorldToScreen(pt);
         foreach (var seg in segments)
         {
@@ -283,5 +288,6 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
     }
 
     #endregion
+
 
 }
