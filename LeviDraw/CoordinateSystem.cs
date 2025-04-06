@@ -6,13 +6,13 @@ namespace LeviDraw;
 
 public class CoordinateSystem : SKGLControl, System.IDisposable
 {
-
     #region Properties&Constructors
 
     public Grid Grid { get; set; }
     public Axes Axes { get; set; }
     public KeyBinds KeyBinds { get; set; }
     public List<Function> Functions { get; set; }
+    public List<CoordinatePoint> Points { get; set; }
 
     private float offsetX;
     private float offsetY;
@@ -46,6 +46,7 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
         Axes = new Axes();
         KeyBinds = new KeyBinds();
         Functions = new List<Function>();
+        Points = new List<CoordinatePoint>();
         inputManager = new InputManager();
         transformManager = new TransformManager();
         PaintSurface += OnPaintSurface;
@@ -157,6 +158,18 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
         MarkDirty();
     }
 
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (e.Button == MouseButtons.Left)
+        {
+            SKPoint worldPos = transformManager.ScreenToWorld(e.Location);
+            CoordinatePoint newPoint = new CoordinatePoint(worldPos, 5f);
+            Points.Add(newPoint);
+            MarkDirty();
+        }
+    }
+
     private void UpdateTimer_Tick(object? sender, EventArgs e)
     {
         float dt = (float)stopwatch.Elapsed.TotalSeconds;
@@ -230,6 +243,12 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
         SKRect visibleRect = new SKRect(0, 0, info.Width, info.Height);
         if (Functions.Count > 0)
             await FunctionRenderer.RenderFunctions(canvas, Functions, visibleRect, transformManager);
+        foreach (var point in Points)
+        {
+            SKPoint screenPos = transformManager.WorldToScreen(point.Position);
+            float screenRadius = point.Size;
+            point.Draw(canvas, screenPos, screenRadius);
+        }
         Func<SKPoint, SKPoint> convert = pt => transformManager.WorldToScreen(pt);
         foreach (var seg in segments)
         {
@@ -288,6 +307,5 @@ public class CoordinateSystem : SKGLControl, System.IDisposable
     }
 
     #endregion
-
 
 }

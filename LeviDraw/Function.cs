@@ -1,14 +1,12 @@
 ﻿using SkiaSharp;
 using MathNet.Symbolics;
 using System.Text.RegularExpressions;
+using System.Collections.Generic;
 
 namespace LeviDraw;
 
 public class Function : System.IDisposable
 {
-
-    #region Properties&Constructors
-
     public string Name { get; private set; }
     public SKColor Color { get; set; }
     public float StrokeWidth { get; set; }
@@ -19,11 +17,11 @@ public class Function : System.IDisposable
     private Func<double, double> _compiledFunction;
     private Func<double, double> _compiledDerivative;
     private LruCache<double, (double, double)> _cache;
-    private int _maxCacheSize;
+    public bool HasCachedCurves { get; private set; }
     private SKRect _cachedVisibleRect;
     private SKMatrix _cachedTransformMatrix;
     private List<Curve> _cachedCurves;
-    private bool _hasCachedCurves;
+    private IFunctionRenderer _renderer;
 
     public Function(string name, string expression, SKColor color, float strokeWidth)
     {
@@ -36,15 +34,16 @@ public class Function : System.IDisposable
         _compiledFunction = _expression.Compile("x");
         _compiledDerivative = _derivativeExpression.Compile("x");
         HardToEvaluate = DetermineHardness(_expression.ToString());
-        _maxCacheSize = HardToEvaluate ? 10000 : 5000;
-        _cache = new LruCache<double, (double, double)>(_maxCacheSize);
-        _cachedCurves = new List<Curve>(); // <== Inicializálva, így nem lesz null.
-        _hasCachedCurves = false;
+        _cache = new LruCache<double, (double, double)>(HardToEvaluate ? 10000 : 5000);
+        _cachedCurves = new List<Curve>();
+        HasCachedCurves = false;
+        if (IsLinear())
+            _renderer = new LinearFunctionRenderer();
+        else if (ExpressionString.ToLowerInvariant().Contains("/x") || ExpressionString.ToLowerInvariant().Contains("1/x") || ExpressionString.ToLowerInvariant().Contains("tan(") || ExpressionString.ToLowerInvariant().Contains("cot("))
+            _renderer = new AdaptiveFunctionRenderer();
+        else
+            _renderer = new DefaultFunctionRenderer();
     }
-
-    #endregion
-
-    #region Methods
 
     private bool DetermineHardness(string expr)
     {
@@ -62,12 +61,10 @@ public class Function : System.IDisposable
         }
         return containsTrig || hasHyperbola || highDegree;
     }
-
     private double Quantize(double x)
     {
         return Math.Round(x, 6);
     }
-
     public double Evaluate(double x)
     {
         double key = Quantize(x);
@@ -80,7 +77,6 @@ public class Function : System.IDisposable
         _cache.Add(key, (y, dy));
         return y;
     }
-
     public double EvaluateDerivative(double x)
     {
         double key = Quantize(x);
@@ -93,91 +89,114 @@ public class Function : System.IDisposable
         _cache.Add(key, (y, dy));
         return dy;
     }
-
-    internal List<Curve> ComputeCurves(SKRect visibleRect, TransformManager transform)
+    public bool IsLinear()
+    {
+        double d0 = EvaluateDerivative(0);
+        double d1 = EvaluateDerivative(1);
+        if (double.IsNaN(d0) || double.IsNaN(d1))
+            return false;
+        return Math.Abs(d0 - d1) < 1e-6;
+    }
+    public SymbolicExpression GetVerticalAsymptoteExpression()
+    {
+        var lowerExpr = ExpressionString.ToLowerInvariant();
+        if (lowerExpr.Contains("tan("))
+            return SymbolicExpression.Parse("(pi/2) + pi*k");
+        if (lowerExpr.Contains("cot("))
+            return SymbolicExpression.Parse("pi*k");
+        if (ExpressionString.Contains("/"))
+        {
+            var parts = ExpressionString.Split('/');
+            if (parts.Length == 2)
+            {
+                string denominatorStr = parts[1];
+                return SymbolicExpression.Parse(denominatorStr);
+            }
+            return SymbolicExpression.Parse("0");
+        }
+        return SymbolicExpression.Parse("null");
+    }
+    public List<double> ComputeVerticalAsymptotePositions(double xMin, double xMax)
+    {
+        var asymptotes = new List<double>();
+        if (ExpressionString.ToLowerInvariant().Contains("tan("))
+        {
+            double period = Math.PI;
+            double baseAsymptote = Math.PI / 2;
+            int kMin = (int)Math.Ceiling((xMin - baseAsymptote) / period);
+            int kMax = (int)Math.Floor((xMax - baseAsymptote) / period);
+            for (int k = kMin; k <= kMax; k++)
+                asymptotes.Add(baseAsymptote + period * k);
+        }
+        else if (ExpressionString.ToLowerInvariant().Contains("cot("))
+        {
+            double period = Math.PI;
+            int kMin = (int)Math.Ceiling(xMin / period);
+            int kMax = (int)Math.Floor(xMax / period);
+            for (int k = kMin; k <= kMax; k++)
+                asymptotes.Add(period * k);
+        }
+        else if (ExpressionString.Contains("/"))
+        {
+            try
+            {
+                var parts = ExpressionString.Split('/');
+                if (parts.Length == 2)
+                {
+                    string denominatorStr = parts[1];
+                    var denominatorExpr = SymbolicExpression.Parse(denominatorStr);
+                    var denominatorFunc = denominatorExpr.Compile("x");
+                    int samples = 1000;
+                    double step = (xMax - xMin) / samples;
+                    double prevValue = denominatorFunc(xMin);
+                    double currentX = xMin;
+                    for (int i = 1; i <= samples; i++)
+                    {
+                        currentX = xMin + i * step;
+                        double currentValue = denominatorFunc(currentX);
+                        if (Math.Abs(currentValue) < 1e-6)
+                            asymptotes.Add(currentX);
+                        else if (prevValue * currentValue < 0)
+                        {
+                            double a = xMin + (i - 1) * step;
+                            double b = currentX;
+                            double mid = (a + b) / 2;
+                            for (int j = 0; j < 20; j++)
+                            {
+                                double fmid = denominatorFunc(mid);
+                                if (Math.Abs(fmid) < 1e-9)
+                                    break;
+                                if (denominatorFunc(a) * fmid < 0)
+                                    b = mid;
+                                else
+                                    a = mid;
+                                mid = (a + b) / 2;
+                            }
+                            asymptotes.Add(mid);
+                        }
+                        prevValue = currentValue;
+                    }
+                }
+            }
+            catch { }
+        }
+        asymptotes.Sort();
+        return asymptotes;
+    }
+    internal List<Curve> GetCurves(SKRect visibleRect, TransformManager transform)
     {
         SKMatrix currentMatrix = transform.Matrix;
-        if (_hasCachedCurves && visibleRect.Equals(_cachedVisibleRect) && currentMatrix.Equals(_cachedTransformMatrix))
+        if (HasCachedCurves && visibleRect.Equals(_cachedVisibleRect) && currentMatrix.Equals(_cachedTransformMatrix))
             return _cachedCurves;
-        List<Curve> curves = new List<Curve>();
-        List<SKPoint> currentPoints = new List<SKPoint>();
-        float left = visibleRect.Left;
-        float right = visibleRect.Right;
-        float screenX = left;
-        double prevDerivative = double.NaN;
-        while (screenX <= right)
-        {
-            double worldX = transform.ScreenToWorld(new System.Drawing.Point((int)screenX, 0)).X;
-            double yVal = Evaluate(worldX);
-            double deriv = EvaluateDerivative(worldX);
-            SKPoint screenPoint = transform.WorldToScreen(new SKPoint((float)worldX, (float)yVal));
-            bool invalid = double.IsNaN(yVal) || double.IsInfinity(yVal) || screenPoint.Y < -10000 || screenPoint.Y > visibleRect.Height + 10000;
-            bool breakSegment = false;
-            if (currentPoints.Count > 0)
-            {
-                if (invalid)
-                    breakSegment = true;
-                else if (!double.IsNaN(prevDerivative) && Math.Abs(deriv - prevDerivative) > 1200)
-                    breakSegment = true;
-                else if (Math.Abs(deriv) > 500 && Math.Abs(screenPoint.Y - currentPoints[currentPoints.Count - 1].Y) > visibleRect.Height / 4.0f)
-                    breakSegment = true;
-            }
-            if (breakSegment)
-            {
-                if (currentPoints.Count > 0)
-                {
-                    curves.Add(new Curve(new List<SKPoint>(currentPoints), Color, StrokeWidth));
-                    currentPoints.Clear();
-                }
-                if (!invalid)
-                {
-                    currentPoints.Add(screenPoint);
-                    prevDerivative = deriv;
-                }
-            }
-            else
-            {
-                if (!invalid)
-                {
-                    currentPoints.Add(screenPoint);
-                    prevDerivative = deriv;
-                }
-                else if (currentPoints.Count > 0)
-                {
-                    curves.Add(new Curve(new List<SKPoint>(currentPoints), Color, StrokeWidth));
-                    currentPoints.Clear();
-                }
-            }
-            float step = GetAdaptiveStepSize(worldX, deriv);
-            screenX += step;
-        }
-        if (currentPoints.Count > 0)
-            curves.Add(new Curve(new List<SKPoint>(currentPoints), Color, StrokeWidth));
+        List<Curve> curves = _renderer.ComputeCurves(this, visibleRect, transform);
         _cachedVisibleRect = visibleRect;
         _cachedTransformMatrix = currentMatrix;
         _cachedCurves = curves;
-        _hasCachedCurves = true;
+        HasCachedCurves = true;
         return curves;
     }
-
-    private float GetAdaptiveStepSize(double worldX, double derivative)
-    {
-        double h = 1e-3;
-        double derivativePlus = EvaluateDerivative(worldX + h);
-        double derivativeMinus = EvaluateDerivative(worldX - h);
-        double curvature = (derivativePlus - derivativeMinus) / (2 * h);
-        float maxStep = HardToEvaluate ? 5f : 10f;
-        float minStep = HardToEvaluate ? 0.5f : 2f;
-        double factor = 1.0 / (1.0 + Math.Abs(derivative) + 0.01 * Math.Abs(curvature));
-        double adaptiveStep = maxStep * factor;
-        return (float)Math.Clamp(adaptiveStep, minStep, maxStep);
-    }
-
     public void Dispose()
     {
         _cache.Clear();
     }
-
-    #endregion
-
 }
