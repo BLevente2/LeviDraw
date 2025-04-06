@@ -37,8 +37,9 @@ namespace LeviDraw
                     screenX += (float)tol;
                     continue;
                 }
-                double yVal = function.Evaluate(worldX);
-                double deriv = function.EvaluateDerivative(worldX);
+                var value = function.EvaluateBoth(worldX);
+                double yVal = value.y;
+                double deriv = value.dy;
                 SKPoint screenPoint = transform.WorldToScreen(new SKPoint((float)worldX, (float)yVal));
                 bool invalid = double.IsNaN(yVal) || double.IsInfinity(yVal) || screenPoint.Y < -10000 || screenPoint.Y > visibleRect.Height + 10000;
                 bool breakSegment = false;
@@ -116,8 +117,8 @@ namespace LeviDraw
         private float GetAdaptiveStepSize(Function function, TransformManager transform, double worldX, double derivative, SKRect visibleRect)
         {
             double h = 1e-3;
-            double derivativePlus = function.EvaluateDerivative(worldX + h);
-            double derivativeMinus = function.EvaluateDerivative(worldX - h);
+            double derivativePlus = function.EvaluateBoth(worldX + h).dy;
+            double derivativeMinus = function.EvaluateBoth(worldX - h).dy;
             double curvature = (derivativePlus - derivativeMinus) / (2 * h);
             float maxStep = function.HardToEvaluate ? 5f : 10f;
             float minStep = function.HardToEvaluate ? 0.5f : 2f;

@@ -23,7 +23,8 @@ namespace LeviDraw
             double x = leftWorldX;
             while (x <= rightWorldX)
             {
-                double y = function.Evaluate(x);
+                var value = function.EvaluateBoth(x);
+                double y = value.y;
                 if (double.IsNaN(y) || double.IsInfinity(y))
                 {
                     if (currentSegment != null && currentSegment.Points.Count > 0)
@@ -58,7 +59,7 @@ namespace LeviDraw
                 }
                 SKPoint screenPoint = transform.WorldToScreen(new SKPoint((float)x, (float)y));
                 currentSegment.Points.Add(screenPoint);
-                double derivative = function.EvaluateDerivative(x);
+                double derivative = value.dy;
                 double dx;
                 if (double.IsNaN(derivative) || Math.Abs(derivative) < 1e-6)
                     dx = baseStep;
@@ -72,8 +73,9 @@ namespace LeviDraw
                     bool converged = false;
                     for (int i = 0; i < 10; i++)
                     {
-                        double fVal = function.Evaluate(newX) - targetY;
-                        double fDeriv = function.EvaluateDerivative(newX);
+                        var res = function.EvaluateBoth(newX);
+                        double fVal = res.y - targetY;
+                        double fDeriv = res.dy;
                         if (Math.Abs(fDeriv) < 1e-6)
                             break;
                         double nextX = newX - fVal / fDeriv;

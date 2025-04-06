@@ -65,29 +65,25 @@ public class Function : System.IDisposable
     {
         return Math.Round(x, 6);
     }
-    public double Evaluate(double x)
+    public (double y, double dy) EvaluateBoth(double x)
     {
         double key = Quantize(x);
         if (_cache.TryGetValue(key, out var res))
-            return res.Item1;
-        double y;
+            return res;
+        double y, dy;
         try { y = _compiledFunction(x); } catch { y = double.NaN; }
-        double dy;
         try { dy = _compiledDerivative(x); } catch { dy = double.NaN; }
-        _cache.Add(key, (y, dy));
-        return y;
+        var result = (y, dy);
+        _cache.Add(key, result);
+        return result;
+    }
+    public double Evaluate(double x)
+    {
+        return EvaluateBoth(x).y;
     }
     public double EvaluateDerivative(double x)
     {
-        double key = Quantize(x);
-        if (_cache.TryGetValue(key, out var res))
-            return res.Item2;
-        double y;
-        try { y = _compiledFunction(x); } catch { y = double.NaN; }
-        double dy;
-        try { dy = _compiledDerivative(x); } catch { dy = double.NaN; }
-        _cache.Add(key, (y, dy));
-        return dy;
+        return EvaluateBoth(x).dy;
     }
     public bool IsLinear()
     {
